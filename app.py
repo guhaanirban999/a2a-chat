@@ -87,6 +87,8 @@ demo = gr.ChatInterface(
     description=f"`{A2A_URL}`",
     examples=[
         "I'm Alex Carter, confirmation LYNN-ALEX01. Plan our two nights — we've got a 12-year-old with us. Mix in what we like and apply any comps I qualify for.",
+        "I'm Alex Carter, confirmation LYNN-ALEX01. Plan our two nights. Actually we're really into wellness and shopping this trip — less gaming.",
+        "I'm Alex Carter, confirmation LYNN-ALEX01. Two nights, and this trip is all about the casino floor — high-stakes tables, exclusive gaming lounges, and anything I'm comped for. Skip the spa.",
         "Create a personalized resort itinerary for my stay. My reservation confirmation is LYNN-ALEX01. Include dining, entertainment, and any offers I am eligible for.",
         "What dining options are available?",
         "Show me available gaming tables.",
