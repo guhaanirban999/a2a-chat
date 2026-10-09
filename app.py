@@ -18,7 +18,8 @@ STATE_MAP = {
 _session_ctx: dict[str, str] = {}
 
 
-def respond(message: str, history: list, request: gr.Request):
+def respond(message: str, history: list, broker_url: str, request: gr.Request):
+    url = (broker_url or A2A_URL).strip().rstrip("/") + "/"
     session_key = str(request.session_hash) if request else "default"
     context_id = _session_ctx.get(session_key, "")
 
@@ -37,7 +38,7 @@ def respond(message: str, history: list, request: gr.Request):
     }
 
     try:
-        resp = httpx.post(A2A_URL, json=payload, timeout=REQUEST_TIMEOUT,
+        resp = httpx.post(url, json=payload, timeout=REQUEST_TIMEOUT,
                           headers={"A2A-Version": "1.0"})
         resp.raise_for_status()
         data = resp.json()
@@ -81,19 +82,27 @@ def _extract_text(parts: list) -> str:
     return "\n".join(p.get("text", "") for p in parts if p.get("text")).strip()
 
 
+broker_input = gr.Textbox(
+    value=A2A_URL,
+    label="Broker URL",
+    placeholder="https://your-agent-url/",
+    scale=1,
+)
+
 demo = gr.ChatInterface(
     fn=respond,
     title="A2A Chat",
-    description=f"`{A2A_URL}`",
+    additional_inputs=[broker_input],
+    additional_inputs_accordion=gr.Accordion("⚙️ Settings", open=True),
     examples=[
-        "I'm Alex Carter, confirmation LYNN-ALEX01. Plan our two nights — we've got a 12-year-old with us. Mix in what we like and apply any comps I qualify for.",
-        "I'm Alex Carter, confirmation LYNN-ALEX01. Plan our two nights. Actually we're really into wellness and shopping this trip — less gaming.",
-        "I'm Alex Carter, confirmation LYNN-ALEX01. Two nights, and this trip is all about the casino floor — high-stakes tables, exclusive gaming lounges, and anything I'm comped for. Skip the spa.",
-        "Create a personalized resort itinerary for my stay. My reservation confirmation is LYNN-ALEX01. Include dining, entertainment, and any offers I am eligible for.",
-        "What dining options are available?",
-        "Show me available gaming tables.",
+        ["I'm Alex Carter, confirmation LYNN-ALEX01. Plan our two nights — we've got a 12-year-old with us. Mix in what we like and apply any comps I qualify for.", A2A_URL],
+        ["I'm Alex Carter, confirmation LYNN-ALEX01. Plan our two nights. Actually we're really into wellness and shopping this trip — less gaming.", A2A_URL],
+        ["I'm Alex Carter, confirmation LYNN-ALEX01. Two nights, and this trip is all about the casino floor — high-stakes tables, exclusive gaming lounges, and anything I'm comped for. Skip the spa.", A2A_URL],
+        ["Create a personalized resort itinerary for my stay. My reservation confirmation is LYNN-ALEX01. Include dining, entertainment, and any offers I am eligible for.", A2A_URL],
+        ["What dining options are available?", A2A_URL],
+        ["Show me available gaming tables.", A2A_URL],
     ],
-    chatbot=gr.Chatbot(height=520),
+    chatbot=gr.Chatbot(height=480),
 )
 
 if __name__ == "__main__":
