@@ -99,8 +99,6 @@ demo = gr.ChatInterface(
         ["I'm Alex Carter, confirmation LYNN-ALEX01. Plan our two nights. Actually we're really into wellness and shopping this trip — less gaming.", A2A_URL],
         ["I'm Alex Carter, confirmation LYNN-ALEX01. Two nights, and this trip is all about the casino floor — high-stakes tables, exclusive gaming lounges, and anything I'm comped for. Skip the spa.", A2A_URL],
         ["Create a personalized resort itinerary for my stay. My reservation confirmation is LYNN-ALEX01. Include dining, entertainment, and any offers I am eligible for.", A2A_URL],
-        ["My confirmation is LYNN-ALEX01. What dining options are available?", A2A_URL],
-        ["My confirmation is LYNN-ALEX01. Show me available gaming tables.", A2A_URL],
     ],
     chatbot=gr.Chatbot(height=480),
 )
