@@ -1,0 +1,6 @@
+services:
+  a2a-chat:
+    build: .
+    ports:
+      - "7860:7860"
+    env_file: .env
