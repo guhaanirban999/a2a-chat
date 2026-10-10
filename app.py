@@ -2,8 +2,16 @@ import os
 import uuid
 import time
 import threading
+import logging
 import httpx
 import gradio as gr
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+log = logging.getLogger("a2a-chat")
 
 A2A_URL = os.getenv(
     "A2A_URL",
@@ -39,10 +47,12 @@ _warmed_sessions: set[str] = set()
 
 def _fire_warmup() -> None:
     for url in WARMUP_URLS:
+        t0 = time.time()
         try:
             httpx.get(url, timeout=15)
-        except Exception:
-            pass
+            log.info("WARMUP ok  url=%s  elapsed=%.2fs", url, time.time() - t0)
+        except Exception as e:
+            log.warning("WARMUP fail  url=%s  elapsed=%.2fs  err=%s", url, time.time() - t0, e)
 
 
 def _animate(label: str, thread: threading.Thread):
@@ -58,15 +68,22 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
     url = (broker_url or A2A_URL).strip().rstrip("/") + "/"
     session_key = str(request.session_hash) if request else "default"
     context_id = _session_ctx.get(session_key, "")
+    req_id = uuid.uuid4().hex[:8]
+    t_total = time.time()
+
+    # Shorten prompt for logs (first 80 chars)
+    prompt_preview = message[:80].replace("\n", " ")
+    log.info("REQUEST  id=%s  session=%s  prompt=%r", req_id, session_key[:8], prompt_preview)
 
     if session_key not in _warmed_sessions:
         _warmed_sessions.add(session_key)
         if WARMUP_URLS:
+            log.info("WARMUP start  session=%s", session_key[:8])
             threading.Thread(target=_fire_warmup, daemon=True).start()
 
     payload = {
         "jsonrpc": "2.0",
-        "id": f"req-{uuid.uuid4().hex[:8]}",
+        "id": f"req-{req_id}",
         "method": "SendMessage",
         "params": {
             "message": {
@@ -86,13 +103,17 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             if retry_reason == "empty_artifact":
                 delay = 25
             elif retry_reason == "agent_failed":
-                delay = 35   # hard agent failure (e.g. reasoning_iterations); needs more recovery time
+                delay = 35
             else:
                 delay = RETRY_DELAY_SECS
             label = (
                 "Our concierge is putting the finishing touches on your itinerary"
                 if retry_reason in ("empty_artifact", "agent_failed")
                 else "This is taking a little longer than usual — please hold"
+            )
+            log.info(
+                "RETRY_DELAY  id=%s  attempt=%d/%d  reason=%s  delay=%ds",
+                req_id, attempt + 1, MAX_RETRIES, retry_reason, delay,
             )
             deadline = time.time() + delay
             i = 0
@@ -107,6 +128,7 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
         # --- fire HTTP request in a thread so we can animate while waiting ---
         result: list = [None]
         exc: list = [None]
+        t_http = time.time()
 
         def _fetch(result=result, exc=exc):
             try:
@@ -117,6 +139,7 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             except Exception as e:
                 exc[0] = e
 
+        log.info("HTTP_START  id=%s  attempt=%d/%d", req_id, attempt + 1, MAX_RETRIES)
         t = threading.Thread(target=_fetch, daemon=True)
         t.start()
 
@@ -124,9 +147,12 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             yield frame
         t.join()
 
+        http_elapsed = time.time() - t_http
+
         # --- handle transport errors ---
         if exc[0] is not None:
             e = exc[0]
+            log.warning("HTTP_ERROR  id=%s  attempt=%d  elapsed=%.2fs  err=%s", req_id, attempt + 1, http_elapsed, e)
             if isinstance(e, httpx.TimeoutException):
                 retry_reason = "timeout"
                 if attempt < MAX_RETRIES - 1:
@@ -137,6 +163,11 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             return
 
         resp = result[0]
+        log.info(
+            "HTTP_DONE  id=%s  attempt=%d  status=%d  elapsed=%.2fs",
+            req_id, attempt + 1, resp.status_code, http_elapsed,
+        )
+
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -160,6 +191,7 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
 
         if "error" in data:
             err = data["error"]
+            log.warning("AGENT_ERROR  id=%s  code=%s  msg=%s", req_id, err.get("code"), err.get("message"))
             yield f"Agent error {err.get('code')}: {err.get('message')}"
             return
 
@@ -180,24 +212,30 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             _extract_text(a.get("parts", [])) for a in task.get("artifacts", [])
         )
 
-        # Retry when agent returns any state with a status message but no itinerary.
-        # Covers: completed (no artifact), input-required stalls, reasoning_iterations failures.
+        log.info(
+            "AGENT_RESPONSE  id=%s  attempt=%d  state=%s  artifact_chars=%d  status_chars=%d  total_elapsed=%.2fs",
+            req_id, attempt + 1, state, len(artifact_text), len(status_text), time.time() - t_total,
+        )
+
+        # Retry when agent returns any state with no itinerary artifact.
         if not artifact_text and attempt < MAX_RETRIES - 1:
-            if state == "failed":
-                retry_reason = "agent_failed"   # harder failure — use longer delay
-            elif state in ("completed", "input-required"):
-                retry_reason = "empty_artifact"
-            else:
-                retry_reason = "empty_artifact"
+            retry_reason = "agent_failed" if state == "failed" else "empty_artifact"
+            log.info("WILL_RETRY  id=%s  attempt=%d  reason=%s  state=%s", req_id, attempt + 1, retry_reason, state)
             continue
 
-        # Exhausted retries with no artifact — show a friendly final message.
+        # Exhausted retries with no artifact — friendly final message.
         if state in ("failed", "input-required") and not artifact_text:
+            log.warning(
+                "GIVE_UP  id=%s  state=%s  status_preview=%r  total_elapsed=%.2fs",
+                req_id, state, status_text[:120], time.time() - t_total,
+            )
             yield (
                 "_I wasn't able to complete your itinerary just now. "
                 "Please try sending your request again._"
             )
             return
+
+        log.info("SUCCESS  id=%s  attempts=%d  total_elapsed=%.2fs", req_id, attempt + 1, time.time() - t_total)
 
         body = artifact_text or status_text or f"(state: {state}, no text returned)"
 
