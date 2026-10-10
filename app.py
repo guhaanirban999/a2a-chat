@@ -71,15 +71,26 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
         },
     }
 
+    retry_reason = None  # "server_error" | "timeout" | "empty_artifact"
+
     for attempt in range(MAX_RETRIES):
         if attempt > 0:
+            # Short delay when the broker responded but artifacts were missing;
+            # longer delay when the broker itself was down/overloaded.
+            delay = 5 if retry_reason == "empty_artifact" else RETRY_DELAY_SECS
             yield (
-                f"_Connection issue — retrying (attempt {attempt + 1}/{MAX_RETRIES}, "
-                f"waiting {RETRY_DELAY_SECS}s…)_"
+                f"_Incomplete response — retrying ({attempt + 1}/{MAX_RETRIES})…_"
+                if retry_reason == "empty_artifact"
+                else (
+                    f"_Connection issue — retrying ({attempt + 1}/{MAX_RETRIES}, "
+                    f"waiting {delay}s…)_"
+                )
             )
-            time.sleep(RETRY_DELAY_SECS)
+            time.sleep(delay)
             # Fresh messageId so the broker doesn't deduplicate the retry.
             payload["params"]["message"]["messageId"] = uuid.uuid4().hex
+
+        retry_reason = None
 
         try:
             resp = httpx.post(
@@ -89,6 +100,7 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             resp.raise_for_status()
             data = resp.json()
         except httpx.TimeoutException:
+            retry_reason = "timeout"
             if attempt < MAX_RETRIES - 1:
                 continue
             yield (
@@ -98,6 +110,7 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             return
         except httpx.HTTPStatusError as e:
             if e.response.status_code >= 500:
+                retry_reason = "server_error"
                 if attempt < MAX_RETRIES - 1:
                     continue
                 yield (
@@ -133,6 +146,11 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
         artifact_text = "".join(
             _extract_text(a.get("parts", [])) for a in task.get("artifacts", [])
         )
+
+        # Broker said "completed" but returned no itinerary artifact — retry quickly.
+        if state == "completed" and not artifact_text and attempt < MAX_RETRIES - 1:
+            retry_reason = "empty_artifact"
+            continue
 
         body = artifact_text or status_text or f"(state: {state}, no text returned)"
 
