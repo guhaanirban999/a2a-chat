@@ -100,12 +100,10 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
     for attempt in range(MAX_RETRIES):
         # --- inter-attempt delay (animated) ---
         if attempt > 0:
-            if retry_reason == "empty_artifact":
-                delay = 25
-            elif retry_reason == "agent_failed":
-                delay = 35
+            if retry_reason in ("empty_artifact", "agent_failed"):
+                delay = 5
             else:
-                delay = RETRY_DELAY_SECS
+                delay = 10  # server_error / timeout
             label = (
                 "Our concierge is putting the finishing touches on your itinerary"
                 if retry_reason in ("empty_artifact", "agent_failed")
