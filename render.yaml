@@ -9,3 +9,9 @@ services:
         value: https://agent-network-shared-conceirge-hn2hkw.rajrd4-1.usa-e1.cloudhub.io/lynn_itinerary_agent/
       - key: A2A_TIMEOUT
         value: 90
+      - key: A2A_MAX_RETRIES
+        value: 3
+      - key: A2A_RETRY_DELAY
+        value: 30
+      - key: WARMUP_URLS
+        value: https://lynn-resort-systems-esulje.2tku8l.usa-e1.cloudhub.io/health,https://lynn-interests-esulje.2tku8l.usa-e1.cloudhub.io/health,https://lynn-casino-gaming-esulje.2tku8l.usa-e1.cloudhub.io/health
