@@ -78,15 +78,20 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
         },
     }
 
-    retry_reason = None  # "server_error" | "timeout" | "empty_artifact"
+    retry_reason = None  # "server_error" | "timeout" | "empty_artifact" | "agent_failed"
 
     for attempt in range(MAX_RETRIES):
         # --- inter-attempt delay (animated) ---
         if attempt > 0:
-            delay = 5 if retry_reason == "empty_artifact" else RETRY_DELAY_SECS
+            if retry_reason == "empty_artifact":
+                delay = 10
+            elif retry_reason == "agent_failed":
+                delay = 25   # hard agent failure (e.g. reasoning_iterations); needs more recovery time
+            else:
+                delay = RETRY_DELAY_SECS
             label = (
                 "Our concierge is putting the finishing touches on your itinerary"
-                if retry_reason == "empty_artifact"
+                if retry_reason in ("empty_artifact", "agent_failed")
                 else "This is taking a little longer than usual — please hold"
             )
             deadline = time.time() + delay
@@ -177,12 +182,13 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
 
         # Retry when agent returns any state with a status message but no itinerary.
         # Covers: completed (no artifact), input-required stalls, reasoning_iterations failures.
-        if (
-            state in ("completed", "input-required", "failed")
-            and not artifact_text
-            and attempt < MAX_RETRIES - 1
-        ):
-            retry_reason = "empty_artifact"
+        if not artifact_text and attempt < MAX_RETRIES - 1:
+            if state == "failed":
+                retry_reason = "agent_failed"   # harder failure — use longer delay
+            elif state in ("completed", "input-required"):
+                retry_reason = "empty_artifact"
+            else:
+                retry_reason = "empty_artifact"
             continue
 
         # Exhausted retries with no artifact — show a friendly final message.
