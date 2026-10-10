@@ -13,8 +13,6 @@ REQUEST_TIMEOUT = int(os.getenv("A2A_TIMEOUT", "90"))
 MAX_RETRIES = int(os.getenv("A2A_MAX_RETRIES", "3"))
 RETRY_DELAY_SECS = int(os.getenv("A2A_RETRY_DELAY", "30"))
 
-# Comma-separated health-check URLs hit on session start to wake Aiven DB connection pools.
-# Override via WARMUP_URLS env var on Render.
 _WARMUP_URLS_RAW = os.getenv(
     "WARMUP_URLS",
     (
@@ -33,12 +31,13 @@ STATE_MAP = {
     "TASK_STATE_WORKING": "working",
 }
 
+_DOT_FRAMES = ["", ".", "..", "..."]
+
 _session_ctx: dict[str, str] = {}
 _warmed_sessions: set[str] = set()
 
 
 def _fire_warmup() -> None:
-    """Background: ping each MCP health endpoint to wake Aiven DB connection pools."""
     for url in WARMUP_URLS:
         try:
             httpx.get(url, timeout=15)
@@ -46,12 +45,20 @@ def _fire_warmup() -> None:
             pass
 
 
+def _animate(label: str, thread: threading.Thread):
+    """Yield animated dot frames (updating every 0.4s) while thread is alive."""
+    i = 0
+    while thread.is_alive():
+        yield f"_{label}{_DOT_FRAMES[i % len(_DOT_FRAMES)]}_"
+        i += 1
+        time.sleep(0.4)
+
+
 def respond(message: str, history: list, broker_url: str, request: gr.Request):
     url = (broker_url or A2A_URL).strip().rstrip("/") + "/"
     session_key = str(request.session_hash) if request else "default"
     context_id = _session_ctx.get(session_key, "")
 
-    # Kick off DB warm-up on first message in this session (fire-and-forget).
     if session_key not in _warmed_sessions:
         _warmed_sessions.add(session_key)
         if WARMUP_URLS:
@@ -74,52 +81,76 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
     retry_reason = None  # "server_error" | "timeout" | "empty_artifact"
 
     for attempt in range(MAX_RETRIES):
+        # --- inter-attempt delay (animated) ---
         if attempt > 0:
-            # Short delay when the broker responded but artifacts were missing;
-            # longer delay when the broker itself was down/overloaded.
             delay = 5 if retry_reason == "empty_artifact" else RETRY_DELAY_SECS
-            yield (
-                "_Our concierge is putting the finishing touches on your itinerary — one moment…_"
+            label = (
+                "Our concierge is putting the finishing touches on your itinerary"
                 if retry_reason == "empty_artifact"
-                else "_This is taking a little longer than usual — please hold while we connect…_"
+                else "This is taking a little longer than usual — please hold"
             )
-            time.sleep(delay)
-            # Fresh messageId so the broker doesn't deduplicate the retry.
+            deadline = time.time() + delay
+            i = 0
+            while time.time() < deadline:
+                yield f"_{label}{_DOT_FRAMES[i % len(_DOT_FRAMES)]}_"
+                i += 1
+                time.sleep(0.4)
             payload["params"]["message"]["messageId"] = uuid.uuid4().hex
 
         retry_reason = None
 
-        try:
-            resp = httpx.post(
-                url, json=payload, timeout=REQUEST_TIMEOUT,
-                headers={"A2A-Version": "1.0"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.TimeoutException:
-            retry_reason = "timeout"
-            if attempt < MAX_RETRIES - 1:
-                continue
-            yield (
-                f"Request timed out (>{REQUEST_TIMEOUT}s) after {MAX_RETRIES} attempts. "
-                "The agent is busy — wait ~60s and try again."
-            )
+        # --- fire HTTP request in a thread so we can animate while waiting ---
+        result: list = [None]
+        exc: list = [None]
+
+        def _fetch(result=result, exc=exc):
+            try:
+                result[0] = httpx.post(
+                    url, json=payload, timeout=REQUEST_TIMEOUT,
+                    headers={"A2A-Version": "1.0"},
+                )
+            except Exception as e:
+                exc[0] = e
+
+        t = threading.Thread(target=_fetch, daemon=True)
+        t.start()
+
+        for frame in _animate("Our Lynn concierge is crafting your itinerary", t):
+            yield frame
+        t.join()
+
+        # --- handle transport errors ---
+        if exc[0] is not None:
+            e = exc[0]
+            if isinstance(e, httpx.TimeoutException):
+                retry_reason = "timeout"
+                if attempt < MAX_RETRIES - 1:
+                    continue
+                yield "_I wasn't able to reach the concierge service in time — please try again in a moment._"
+                return
+            yield f"_Unexpected error: {e}_"
             return
+
+        resp = result[0]
+        try:
+            resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code >= 500:
                 retry_reason = "server_error"
                 if attempt < MAX_RETRIES - 1:
                     continue
-                yield (
-                    f"Server error ({e.response.status_code}) after {MAX_RETRIES} attempts. "
-                    "The broker may be recovering — wait ~60–90s and try again."
-                )
+                yield "_The service is temporarily unavailable — please try again in a moment._"
                 return
-            # 4xx — don't retry
             yield f"HTTP {e.response.status_code}: {e.response.text[:200]}"
             return
-        except Exception as e:
-            yield f"Error: {e}"
+
+        try:
+            data = resp.json()
+        except Exception:
+            retry_reason = "server_error"
+            if attempt < MAX_RETRIES - 1:
+                continue
+            yield "_Received an unexpected response — please try again._"
             return
 
         if "error" in data:
@@ -144,10 +175,8 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             _extract_text(a.get("parts", [])) for a in task.get("artifacts", [])
         )
 
-        # Retry whenever the agent returns a status message but no itinerary artifact:
-        # - completed with no artifact (agent finished without emitting content)
-        # - input-required with no artifact (phase-0 stall leaking internal summary)
-        # - failed with no artifact (transient agent error)
+        # Retry when agent returns any state with a status message but no itinerary.
+        # Covers: completed (no artifact), input-required stalls, reasoning_iterations failures.
         if (
             state in ("completed", "input-required", "failed")
             and not artifact_text
@@ -156,13 +185,19 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             retry_reason = "empty_artifact"
             continue
 
+        # Exhausted retries with no artifact — show a friendly final message.
+        if state in ("failed", "input-required") and not artifact_text:
+            yield (
+                "_I wasn't able to complete your itinerary just now. "
+                "Please try sending your request again._"
+            )
+            return
+
         body = artifact_text or status_text or f"(state: {state}, no text returned)"
 
-        if state == "input-required":
+        if state == "input-required" and artifact_text:
             body = f"**Agent needs more info:**\n\n{body}"
-        elif state == "failed":
-            body = f"**Agent failed:**\n\n{body}"
-        elif state not in ("completed", "unknown"):
+        elif state not in ("completed", "unknown", "failed", "input-required"):
             body = f"*State: {state}*\n\n{body}"
 
         yield body
