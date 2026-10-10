@@ -147,8 +147,15 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             _extract_text(a.get("parts", [])) for a in task.get("artifacts", [])
         )
 
-        # Broker said "completed" but returned no itinerary artifact — retry quickly.
-        if state == "completed" and not artifact_text and attempt < MAX_RETRIES - 1:
+        # Retry whenever the agent returns a status message but no itinerary artifact:
+        # - completed with no artifact (agent finished without emitting content)
+        # - input-required with no artifact (phase-0 stall leaking internal summary)
+        # - failed with no artifact (transient agent error)
+        if (
+            state in ("completed", "input-required", "failed")
+            and not artifact_text
+            and attempt < MAX_RETRIES - 1
+        ):
             retry_reason = "empty_artifact"
             continue
 
