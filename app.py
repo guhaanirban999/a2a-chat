@@ -217,17 +217,19 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             req_id, attempt + 1, state, len(artifact_text), len(status_text), time.time() - t_total,
         )
 
-        # Retry when agent returns any state with no itinerary artifact.
-        if not artifact_text and attempt < MAX_RETRIES - 1:
+        # The DW gateway bridge puts the itinerary in status_text, not artifacts —
+        # so artifact_chars is always 0. Only retry when BOTH are truly empty.
+        no_content = not artifact_text and not status_text
+        if no_content and attempt < MAX_RETRIES - 1:
             retry_reason = "agent_failed" if state == "failed" else "empty_artifact"
             log.info("WILL_RETRY  id=%s  attempt=%d  reason=%s  state=%s", req_id, attempt + 1, retry_reason, state)
             continue
 
-        # Exhausted retries with no artifact — friendly final message.
-        if state in ("failed", "input-required") and not artifact_text:
+        # Exhausted retries with genuinely no content — friendly final message.
+        if no_content:
             log.warning(
-                "GIVE_UP  id=%s  state=%s  status_preview=%r  total_elapsed=%.2fs",
-                req_id, state, status_text[:120], time.time() - t_total,
+                "GIVE_UP  id=%s  state=%s  total_elapsed=%.2fs",
+                req_id, state, time.time() - t_total,
             )
             yield (
                 "_I wasn't able to complete your itinerary just now. "
