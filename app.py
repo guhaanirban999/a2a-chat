@@ -79,12 +79,9 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
             # longer delay when the broker itself was down/overloaded.
             delay = 5 if retry_reason == "empty_artifact" else RETRY_DELAY_SECS
             yield (
-                f"_Incomplete response — retrying ({attempt + 1}/{MAX_RETRIES})…_"
+                "_Our concierge is putting the finishing touches on your itinerary — one moment…_"
                 if retry_reason == "empty_artifact"
-                else (
-                    f"_Connection issue — retrying ({attempt + 1}/{MAX_RETRIES}, "
-                    f"waiting {delay}s…)_"
-                )
+                else "_This is taking a little longer than usual — please hold while we connect…_"
             )
             time.sleep(delay)
             # Fresh messageId so the broker doesn't deduplicate the retry.
