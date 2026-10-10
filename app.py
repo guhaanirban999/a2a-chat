@@ -84,9 +84,9 @@ def respond(message: str, history: list, broker_url: str, request: gr.Request):
         # --- inter-attempt delay (animated) ---
         if attempt > 0:
             if retry_reason == "empty_artifact":
-                delay = 10
+                delay = 25
             elif retry_reason == "agent_failed":
-                delay = 25   # hard agent failure (e.g. reasoning_iterations); needs more recovery time
+                delay = 35   # hard agent failure (e.g. reasoning_iterations); needs more recovery time
             else:
                 delay = RETRY_DELAY_SECS
             label = (
